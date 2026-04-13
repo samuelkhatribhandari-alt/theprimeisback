@@ -951,50 +951,40 @@ function initFirebase() {
     firebase.initializeApp(FIREBASE_CONFIG);
     auth = firebase.auth();
     db   = firebase.firestore();
+
+    // Persistencia LOCAL aquí, una sola vez, antes de cualquier login
+    auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
     firebaseReady = true;
 
-    // Persistencia LOCAL para que sobreviva recargas en todos los navegadores
-    auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(() => {
-
-      // Si venimos de un redirect de Safari, capturar el resultado primero
-      if (localStorage.getItem('tpib_pending_redirect') === '1') {
-        localStorage.removeItem('tpib_pending_redirect');
-        auth.getRedirectResult()
-          .then(async result => {
-            if (result && result.user) {
-              currentUser = result.user;
-              await loadFromFirestore();
-              showApp();
-            }
-          })
-          .catch(e => console.warn('redirect result error:', e.code));
-      }
-
-      // Listener principal — maneja login normal (popup) y sesión existente
-      auth.onAuthStateChanged(async user => {
-        if (user) {
-          currentUser = user;
+    // Capturar resultado de redirect (Safari) si venimos de uno
+    auth.getRedirectResult()
+      .then(async result => {
+        if (result && result.user) {
+          currentUser = result.user;
           await loadFromFirestore();
           showApp();
-        } else {
-          document.getElementById('loading').classList.add('hidden');
-          document.getElementById('login-screen').classList.remove('hidden');
+        }
+      })
+      .catch(e => {
+        // Error esperado cuando no hay redirect pendiente — ignorar
+        if (e.code !== 'auth/no-auth-event') {
+          console.warn('getRedirectResult:', e.code);
         }
       });
 
-    }).catch(e => {
-      console.warn('setPersistence error:', e);
-      auth.onAuthStateChanged(async user => {
-        if (user) { currentUser = user; await loadFromFirestore(); showApp(); }
-        else {
-          document.getElementById('loading').classList.add('hidden');
-          document.getElementById('login-screen').classList.remove('hidden');
-        }
-      });
+    auth.onAuthStateChanged(async user => {
+      if (user) {
+        currentUser = user;
+        await loadFromFirestore();
+        showApp();
+      } else {
+        document.getElementById('loading').classList.add('hidden');
+        document.getElementById('login-screen').classList.remove('hidden');
+      }
     });
 
   } catch(e) {
-    console.warn('Firebase init failed — falling back to localStorage', e);
+    console.warn('Firebase init failed:', e);
     document.getElementById('loading').classList.add('hidden');
     document.getElementById('login-screen').classList.remove('hidden');
   }
@@ -1008,27 +998,30 @@ function isSafari() {
   return /Safari/i.test(ua) && !/Chrome|CriOS|FxiOS|EdgiOS|OPiOS/i.test(ua);
 }
 
-async function signInGoogle() {
+// IMPORTANTE: esta función NO debe tener ningún await ANTES de abrir
+// el popup/redirect — cualquier await previo rompe el gesto del usuario
+// en iOS Safari y Chrome móvil, y el navegador bloquea la ventana.
+function signInGoogle() {
   if (!firebaseReady) { toast('Firebase no configurado — usa modo local'); return; }
-  try {
-    const provider = new firebase.auth.GoogleAuthProvider();
-    if (isSafari()) {
-      // Safari bloquea popups — marcar que viene redirect y redirigir
-      localStorage.setItem('tpib_pending_redirect', '1');
-      await auth.signInWithRedirect(provider);
-    } else {
-      await auth.signInWithPopup(provider);
-    }
-  } catch(e) {
-    console.error(e);
-    localStorage.removeItem('tpib_pending_redirect');
-    if (e.code === 'auth/popup-closed-by-user') {
-      toast('Ventana cerrada. Inténtalo de nuevo.');
-    } else if (e.code === 'auth/popup-blocked') {
-      toast('Activa ventanas emergentes para este sitio e inténtalo de nuevo.');
-    } else {
-      toast('Error al iniciar sesión: ' + (e.code || e.message));
-    }
+  const provider = new firebase.auth.GoogleAuthProvider();
+  if (isSafari()) {
+    auth.signInWithRedirect(provider)
+      .catch(e => {
+        console.error(e);
+        toast('Error al iniciar sesión: ' + (e.code || e.message));
+      });
+  } else {
+    auth.signInWithPopup(provider)
+      .catch(e => {
+        console.error(e);
+        if (e.code === 'auth/popup-closed-by-user') {
+          toast('Ventana cerrada. Inténtalo de nuevo.');
+        } else if (e.code === 'auth/popup-blocked') {
+          toast('Activa ventanas emergentes para este sitio.');
+        } else {
+          toast('Error al iniciar sesión: ' + (e.code || e.message));
+        }
+      });
   }
 }
 
